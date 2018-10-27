@@ -1,85 +1,90 @@
 #include <iostream>
 #include "mpi.h"
 #include <ctime>
+#include <limits>
 
-void FillingArray(double array[], int n)
+void FillingArray(double array[], int n, int min, int max) //function to fill the array with real numbers in the range [min, max]
 {
+	srand(time(nullptr));
 	for (int i = 0; i < n; i++)
 	{
-		srand(time(nullptr));
-		array[i] = rand() % 10;
+		double ri = (double)rand() / RAND_MAX;
+		array[i] = min + (max - min)*ri;
 		std::cout << array[i] << " ";
 	}
 }
 int main(int argc, char **argv)
 {
-	double *array;
-	int k = 100;
-	if (argc == 2)
-	{
-		k = atoi(argv[1]);
-	}
+	int k = 10; 
 	int ProcNum, ProcRank;
-	double ProcSum, TotalSum = 0.0;
-	array = new double[k];
-	double *recbuf = new double[k];
-	int sum = 0;
-	double tstart, tfinish;
+
 	MPI_Init(&argc, &argv);
 	MPI_Comm_size(MPI_COMM_WORLD, &ProcNum);
 	MPI_Comm_rank(MPI_COMM_WORLD, &ProcRank);
-	int rem = k % ProcNum;
+	
+	if (ProcRank == 0) //zero process sets the size of the array (entered by the user via the command line)
+	{
+		if (argc == 4)
+		{
+			k = atoi(argv[1]);
+		}
+		else k = 10;
+	}
+
+	MPI_Bcast(&k, 1, MPI_INT, 0, MPI_COMM_WORLD); //broadcasts a size of the array from the process with rank "0" to all other processes of the communicator
+	double tstart, tfinish;
+	double *array;
+	double TotalSum = 0.0; //total amount. counted on zero process
+
 	if (ProcRank == 0)
 	{
-		FillingArray(array, k);
+		array = new double[k];
+		FillingArray(array, k, atoi(argv[2]), atoi(argv[3]));
 		tstart = MPI_Wtime();
 	}
-	if (rem != k)
-	{
-		int *sendcounts = new int[ProcNum * sizeof(int)];
-		int *displs = new int[ProcNum * sizeof(int)];
-		for (int i = 0; i < ProcNum; i++)
-		{
-			sendcounts[i] = k / ProcNum;
-			if (rem > 0)
-			{
-				sendcounts[i]++;
-				rem--;
-			}
-			displs[i] = sum;
-			sum += sendcounts[i];
-		}
-		MPI_Scatterv(array, sendcounts, displs, MPI_DOUBLE, recbuf, k, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-		for (int i = 0; i < sendcounts[ProcRank]; i++)
-		{
-			ProcSum += recbuf[i];
-		}
-		delete[] recbuf, sendcounts, displs;
+	else {
+		array = nullptr;
 	}
-	else if (rem == k)
+
+	int rem = k % ProcNum; 
+
+	int *sendcounts = new int[ProcNum]; //integer array (of length group size) specifying the number of elements to send to each processor
+	int *displs = new int[ProcNum]; //integer array (of length group size). Entry i specifies the displacement (relative to sendbuf from which to take the outgoing data to process i
+	int sum = 0; //sum of counts. used to calculate displacements
+	for (int i = 0; i < ProcNum; i++)
 	{
-		MPI_Bcast(array, k, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-		for (int i = ProcRank; i < ProcRank + 1; i++)
+		sendcounts[i] = k / ProcNum;
+		if (rem > 0)
 		{
-			if (i < k)
-			{
-				if (rem > 0)
-				{
-					ProcSum += array[i];
-					rem--;
-				}
-			}
-			else ProcSum = 0.0;
+			sendcounts[i]++;
+			rem--;
 		}
+		displs[i] = sum;
+		sum += sendcounts[i];
 	}
-	MPI_Reduce(&ProcSum, &TotalSum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+	
+	double *recbuf = new double[sendcounts[ProcRank]]; //address of receive buffer
+
+	double ProcSum = 0.0; //partial amount for each process
+
+	MPI_Scatterv(array, sendcounts, displs, MPI_DOUBLE, recbuf, sendcounts[ProcRank], MPI_DOUBLE, 0, MPI_COMM_WORLD); //sendcounts[ProcRank] - number of elements in receive buffer (recbuf)
+
+	for (int i = 0; i < sendcounts[ProcRank]; i++) //considers partial amount
+	{
+		ProcSum += recbuf[i];
+	}
+
+	MPI_Reduce(&ProcSum, &TotalSum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD); //reduces partial amount on all processes to a total amount
+	tfinish = MPI_Wtime();
 	if (ProcRank == 0)
 	{
+		std::cout << std::endl;
+		std::cout << "Parallel version (using functions Scatterv and Reduce): " << std::endl;
+		std::cout << "Elapsed time = " << tfinish - tstart << std::endl;
 		std::cout << "TotalSum = " << TotalSum << std::endl;
-		tfinish = MPI_Wtime();
-		std::cout << "Wtime = " << tfinish - tstart << std::endl;
+		
 	}
-	//для одного процесса
+	//Linear version of the algorithm
 	double tstart1;
 	double TotalSum1 = 0.0;
 	if (ProcRank == 0)
@@ -87,11 +92,13 @@ int main(int argc, char **argv)
 		tstart1 = MPI_Wtime();
 		for (int i = 0; i < k; i++)
 			TotalSum1 += array[i];
+		std::cout << std::endl;
+		std::cout << "Linear version (one process): " << std::endl;
 		std::cout << "TotalSum = " << TotalSum1 << std::endl;
-		std::cout << "Wtime for one process = " << MPI_Wtime() - tstart1 << std::endl;
+		std::cout << "Elapsed time = " << MPI_Wtime() - tstart1 << std::endl;
 	}
 
 	MPI_Finalize();
-	delete[] array;
+	delete[] recbuf, sendcounts, displs, array;
 	return 0;
 }
