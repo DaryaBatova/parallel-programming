@@ -9,10 +9,10 @@
 
 int NEW_TREE_Reduce(void *sendbuf, void *recvbuf, int count, MPI_Datatype type, MPI_Op op, int root, MPI_Comm comm);
 size_t stype(MPI_Datatype type);
-int *createarray(int n);
 void arrayinit(int *array, int n, int min, int max);
-
-
+int* NodePosition(int ProcNum, int root, int ProcRank);
+int ReduceLeftRight(void* sendbuf, void* recvbuf, void* res, int count, MPI_Datatype type, int left, int right, int root, MPI_Op op, MPI_Comm comm);
+int NEW_TREE_Reduce_Binary_Tree(void *sendbuf, void *recvbuf, int count, MPI_Datatype type, MPI_Op op, int root, MPI_Comm comm);
 
 int main(int argc, char **argv)
 {
@@ -45,17 +45,31 @@ int main(int argc, char **argv)
 	{
 		tstart1 = MPI_Wtime();
 	}
-	if (k == 0)
+	switch (k)
+	{
+	case 0:
 		MPI_Reduce(array, res, n, MPI_INT, MPI_SUM, root, MPI_COMM_WORLD);
-	else if (k == 1)
+		break;
+	case 1:
 		NEW_TREE_Reduce(array, res, n, MPI_INT, MPI_SUM, root, MPI_COMM_WORLD);
+		break;
+	case 2:
+		NEW_TREE_Reduce_Binary_Tree(array, res, n, MPI_INT, MPI_SUM, root, MPI_COMM_WORLD);
+		break;
+	default:
+		MPI_Finalize();
+		return 0;
+	}
+
 	if (ProcRank == root)
 	{
 		std::cout << std::endl;
 		if (k == 0)
 			std::cout << "MPI_Reduce: " << std::endl;
 		else if (k == 1)
-			std::cout << "TREE_Reduce: " << std::endl;
+			std::cout << "TREE_Reduce_Binomial_Tree: " << std::endl;
+		else if(k == 2)
+			std::cout << "TREE_Reduce_Binary_Tree: " << std::endl;
 		std::cout << "Elapsed time = " << MPI_Wtime() - tstart1 << std::endl;
 		std::cout << "You are in process " << root << std::endl;
 		for (int i = 0; i < n; i++)
@@ -68,12 +82,6 @@ int main(int argc, char **argv)
 	
 }
 
-int *createarray(int n)
-{
-	int *array = new int[n];
-
-	return array;
-}
 void arrayinit(int *array, int n, int min, int max)
 {
 
@@ -243,30 +251,6 @@ void Operation(MPI_Datatype type, MPI_Op op, void* buf1, void* buf2, void* res, 
 	}
 }
 
-int number_in_old_degree(int num)
-{
-	int tmp = 1 << 30;
-	while (num < tmp)
-	{
-		tmp >>= 1;
-	}
-	return tmp;
-}
-
-int old_degree(int num)
-{
-	int tmp = 1 << 30;
-	int count = 31;
-	while (num < tmp)
-	{
-		tmp >>= 1;
-		count--;
-	}
-	return count;
-}
-
-
-
 
 int NEW_TREE_Reduce(void *sendbuf, void *recvbuf, int count, MPI_Datatype type, MPI_Op op, int root, MPI_Comm comm)
 {
@@ -274,49 +258,155 @@ int NEW_TREE_Reduce(void *sendbuf, void *recvbuf, int count, MPI_Datatype type, 
 	int ProcRank, ProcNum;
 	MPI_Comm_size(MPI_COMM_WORLD, &ProcNum);
 	MPI_Comm_rank(MPI_COMM_WORLD, &ProcRank);
-
-	int RankSend{ 0 };
-	void * res;
-	int finish = std::log(ProcNum) / std::log(2);
-	if (ProcNum % 2 > 0)
-		finish++;
-
-	int newProcRank = (ProcRank < root ? ProcRank + 1 : ProcRank);
-	int start = (ProcRank == root ? 0 : old_degree(newProcRank));
-	for (int i = finish; i >= start; i--)
+	int RankRecv, RankSend;
+	void * res = malloc(count * stype(type));
+	if (ProcRank != root)
+		recvbuf = malloc(count * stype(type));
+	memcpy(recvbuf, sendbuf, count*stype(type));
+	int newProcRank = (ProcRank - root + ProcNum) % ProcNum;
+	int mask = 1;
+	while(mask < ProcNum)
 	{
-		if (ProcRank == root)
+		if ((newProcRank & mask) == 0)
 		{
-			RankSend = std::pow(2, i);
-			RankSend <= root ? RankSend-- : RankSend;
+			RankSend = newProcRank|mask;
+			if (RankSend < ProcNum)
+			{
+				RankSend = (RankSend + root) % ProcNum;
+				MPI_Recv(res, count, type, RankSend, 0, comm, &status);
+				Operation(type, op, recvbuf, res, recvbuf, count);
+			}
 		}
 		else
 		{
-			RankSend = std::pow(2, i) + newProcRank;
-			if (RankSend <= root)
-				RankSend--;
+			RankRecv = newProcRank&(~mask);
+			RankRecv = (RankRecv + root) % ProcNum;
+			MPI_Send(recvbuf, count, type, RankRecv, 0, comm);
+			break;
 		}
-		if (RankSend < ProcNum)
-		{
-			MPI_Recv(recvbuf, count, type, RankSend, 0, comm, &status);
-			Operation(type, op, sendbuf, recvbuf, sendbuf, count);
-		}
+		mask = mask << 1;
 	}
 	if (ProcRank != root)
 	{
-		int oldnum = number_in_old_degree(newProcRank);
-		int RankRecv = newProcRank & (~oldnum);
-		if (RankRecv == 0)
-			RankRecv = root;
-		else if (RankRecv <= root)
-			RankRecv--;
-		MPI_Send(sendbuf, count, type, RankRecv, 0, comm);
+		free(recvbuf);
 	}
 
 	if (ProcRank == root)
 	{
-		memcpy(recvbuf, sendbuf, count*stype(type));
+		free(res);
 	}
-	
+
+	return 0;
+}
+
+int* NodePosition(int ProcNum, int root, int ProcRank)
+{
+	int* posProcess = new int[3];
+	int left = -1;
+	int right = -1;
+	int parent = -1;
+	int size = ProcNum;
+	int node = size - 1;
+	while(1)
+	{
+		int rsize = size / 2; //число узлов в правом поддереве
+		int lsize = size - rsize - 1;
+		left = right = -1;
+		if (size > 1)
+		{
+			left = node - 1;
+			if (size > 2)
+			{
+				right = node - lsize - 1;
+			}
+		}
+		if (ProcRank == node)
+		{
+			break;
+		}
+		parent = node;
+		if (ProcRank > right)
+		{
+			node = left;
+			size = lsize;
+		}
+		else {
+			node = right;
+			size = rsize;
+		}
+	}
+	posProcess[0] = parent;
+	posProcess[1] = left;
+	posProcess[2] = right;
+	return posProcess;
+
+}
+
+int ReduceLeftRight(void* sendbuf, void* recvbuf, void* res, int count, MPI_Datatype type, int left, int right, int root,MPI_Op op, MPI_Comm comm)
+{
+	MPI_Status status;
+	memcpy(recvbuf, sendbuf, count*stype(type));
+	MPI_Recv(res, count, type, left, 0, comm, &status);
+	Operation(type, op, res, recvbuf, recvbuf, count);
+	if (right >= 0)
+	{
+		MPI_Recv(res, count, type, right, 0, comm, &status);
+		Operation(type, op, res, recvbuf, recvbuf, count);
+	}
+	return 0;
+}
+
+int NEW_TREE_Reduce_Binary_Tree(void *sendbuf, void *recvbuf, int count, MPI_Datatype type, MPI_Op op, int root, MPI_Comm comm)
+{
+	MPI_Status status;
+	int ProcRank, ProcNum;
+	MPI_Comm_size(MPI_COMM_WORLD, &ProcNum);
+	MPI_Comm_rank(MPI_COMM_WORLD, &ProcRank);
+	int RankRecv, RankSend;
+	int* posProcess = NodePosition(ProcNum, root, ProcRank);
+	if ((posProcess[1] < 0) && (posProcess[2] < 0))
+	{
+		MPI_Send(sendbuf, count, type, posProcess[0], 0, comm);
+	}
+	else
+	{
+		void* res = malloc(count * stype(type));
+		if (ProcRank == ProcNum - 1)
+		{
+			if (root == ProcNum - 1)
+			{
+				ReduceLeftRight(sendbuf, recvbuf, res, count, type, posProcess[1], posProcess[2], root, op, comm);
+			}
+			else
+			{
+				recvbuf = malloc(count * stype(type));
+				ReduceLeftRight(sendbuf, recvbuf, res, count, type, posProcess[1], posProcess[2], root, op, comm);
+				MPI_Send(recvbuf, count, type, root, 0, comm);
+				free(recvbuf);
+			}
+
+		}
+		else
+		{
+			if (ProcRank == root)
+			{
+				ReduceLeftRight(sendbuf, recvbuf, res, count, type, posProcess[1], posProcess[2], root, op, comm);
+				MPI_Send(recvbuf, count, type, posProcess[0], 0, comm);
+			}
+			else
+			{
+				recvbuf = malloc(count * stype(type));
+				ReduceLeftRight(sendbuf, recvbuf, res, count, type, posProcess[1], posProcess[2], root, op, comm);
+				MPI_Send(recvbuf, count, type, posProcess[0], 0, comm);
+				free(recvbuf);
+			}
+
+		}
+		free(res);
+	}
+	if ((ProcRank == root) && (root != ProcNum - 1))
+	{
+		MPI_Recv(recvbuf, count, type, ProcNum - 1, 0, comm, &status);
+	}
 	return 0;
 }
